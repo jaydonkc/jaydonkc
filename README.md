@@ -3,6 +3,7 @@
 I'm a Computer Science student at Cal Poly SLO with an interest in using technology to solve meaningful problems.
 
 🔬 I believe that biology is rapidly becoming an engineering problem, and I'm exploring how tools like AI, data science, and bioinformatics can change medicine and human health.
+
 🤯 Fun fact: I have never eaten a Cheeto 
 <!--
 **jaydonkc/jaydonkc** is a ✨ _special_ ✨ repository because its `README.md` (this file) appears on your GitHub profile.
