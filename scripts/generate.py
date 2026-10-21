@@ -6,6 +6,7 @@ from hashlib import sha256
 from html import escape
 from html.parser import HTMLParser
 import json
+import math
 from pathlib import Path
 import random
 import re
@@ -66,6 +67,50 @@ def neighbors(index, width, height):
             for nx in range(max(0, x - 1), min(width, x + 2)) if (nx, ny) != (x, y)]
 
 
+def deductions(width, valid, visible, flagged):
+    """Infer moves using revealed numbers only, including simple subset patterns."""
+    constraints = []
+    safe, mines = set(), set()
+    for index, number in sorted(visible.items()):
+        nearby = set(neighbors(index, width, 7)) & valid
+        unknown = nearby - visible.keys() - flagged
+        remaining = number - len(nearby & flagged)
+        if unknown:
+            constraints.append((unknown, remaining))
+            if remaining == 0:
+                safe.update(unknown)
+            elif remaining == len(unknown):
+                mines.update(unknown)
+    for smaller, count in constraints:
+        for larger, other_count in constraints:
+            if smaller < larger:
+                difference = larger - smaller
+                if other_count == count:
+                    safe.update(difference)
+                elif other_count - count == len(difference):
+                    mines.update(difference)
+    return safe, mines, constraints
+
+
+def choose_move(width, valid, visible, flagged, cursor, rng, mine_count):
+    safe, mines, constraints = deductions(width, valid, visible, flagged)
+    def distance(index):
+        return math.hypot(index % width - cursor % width,
+                          index // width - cursor // width)
+    options = [(index, 'reveal') for index in sorted(safe)]
+    options += [(index, 'flag') for index in sorted(mines)]
+    if options:
+        index, kind = min(options, key=lambda move: distance(move[0]) + rng.uniform(0, .65))
+        return kind, index, 'deduction'
+    unknown = valid - visible.keys() - flagged
+    baseline = (mine_count - len(flagged)) / len(unknown)
+    def risk(index):
+        estimates = [remaining / len(cells) for cells, remaining in constraints if index in cells]
+        return max(estimates) if estimates else baseline
+    index = min(sorted(unknown), key=lambda i: (round(risk(i), 6), distance(i) + rng.uniform(0, 1.5)))
+    return 'reveal', index, 'guess'
+
+
 def build_board(calendar):
     days = calendar['days']
     first = date.fromisoformat(days[0]['date'])
@@ -77,42 +122,90 @@ def build_board(calendar):
         cells[(position % 7) * width + position // 7] = day
     valid = {i for i, cell in enumerate(cells) if cell is not None}
     seed = int(sha256(json.dumps(days, sort_keys=True).encode()).hexdigest()[:16], 16)
-    rng = random.Random(seed)
-    # Keep the first click and its neighborhood safe, as in the playable game.
     start = min(valid, key=lambda i: (cells[i]['level'], i))
     safe = {start, *neighbors(start, width, 7)}
     candidates = sorted(valid - safe)
-    weighted = sorted(candidates, key=lambda i: rng.random() ** (1 / (1 + cells[i]['level'])))
-    mines = set(weighted[-round(len(valid) * .16):])
-    numbers = [sum(n in mines for n in neighbors(i, width, 7)) for i in range(len(cells))]
+    best = None
+    # Curate one recorded game at generation time, then replay it unchanged.
+    # Each candidate is played using visible clues, with genuine guesses if stuck.
+    for attempt in range(32):
+        rng = random.Random(seed + attempt * 0x9e3779b9)
+        weighted = sorted(candidates, key=lambda i: rng.random() ** (1 / (1 + cells[i]['level'])))
+        mines = set(weighted[-round(len(valid) * .16):])
+        numbers = [sum(n in mines for n in neighbors(i, width, 7)) for i in range(len(cells))]
+        events, opened = play_board(width, valid, mines, numbers, start, rng)
+        candidate = (width, cells, mines, numbers, events)
+        if events[-1]['kind'] != 'hit':
+            return candidate
+        if best is None or opened > best[0]:
+            best = (opened, candidate)
+    return best[1]
+
+
+def play_board(width, valid, mines, numbers, start, rng):
     revealed, flagged, events = set(), set(), []
 
-    def reveal(index):
+    def reveal(index, reason):
+        if index in mines:
+            events.append({'kind': 'hit', 'index': index, 'cells': sorted(mines - flagged), 'reason': reason})
+            return False
         queue, opened = [index], set()
         while queue:
             item = queue.pop()
-            if item in revealed or item not in valid or item in mines:
+            if item in revealed or item in flagged or item not in valid or item in mines:
                 continue
             revealed.add(item)
             opened.add(item)
             if numbers[item] == 0:
                 queue.extend(neighbors(item, width, 7))
         if opened:
-            events.append({'kind': 'reveal', 'index': index, 'cells': sorted(opened)})
+            events.append({'kind': 'reveal', 'index': index, 'cells': sorted(opened), 'reason': reason})
+        return True
 
-    reveal(start)
+    reveal(start, 'first')
+    cursor = start
     while valid - revealed - mines:
-        # Animate local flags and a sweep across the remaining safe tiles.
-        eligible = [i for i in mines - flagged if any(n in revealed for n in neighbors(i, width, 7))]
-        for i in sorted(eligible):
-            flagged.add(i)
-            events.append({'kind': 'flag', 'index': i, 'cells': [i]})
-        frontier = valid - revealed - mines
-        index = min(frontier, key=lambda i: (not any(n in revealed for n in neighbors(i, width, 7)), i % width, i // width))
-        reveal(index)
-    for i in sorted(mines - flagged):
-        events.append({'kind': 'flag', 'index': i, 'cells': [i]})
-    return width, cells, mines, numbers, events
+        visible = {i: numbers[i] for i in revealed}
+        kind, index, reason = choose_move(width, valid, visible, flagged, cursor, rng, len(mines))
+        if kind == 'flag':
+            flagged.add(index)
+            events.append({'kind': kind, 'index': index, 'cells': [index], 'reason': reason})
+        elif not reveal(index, reason):
+            break
+        cursor = index
+    if events[-1]['kind'] != 'hit':
+        for i in sorted(valid - revealed - flagged):
+            events.append({'kind': 'flag', 'index': i, 'cells': [i], 'reason': 'deduction'})
+    return events, len(revealed)
+
+
+def build_timeline(events, width):
+    """Plan eased pointer travel, varied thinking time, and a settled click."""
+    rng = random.Random(sha256(json.dumps(events, sort_keys=True).encode()).digest())
+    first_index = events[0]['index']
+    previous = (first_index % width - .8, first_index // width - .8)
+    now, times = .8, []
+    motion = [(0, *previous)]
+    for index, event in enumerate(events):
+        target = (event['index'] % width + rng.uniform(-.10, .10),
+                  event['index'] // width + rng.uniform(-.10, .10))
+        think = rng.uniform(.22, .58)
+        if event['reason'] == 'guess':
+            think += rng.uniform(1.1, 2.1)
+        elif index and index % 9 == 0:
+            think += rng.uniform(.7, 1.4)
+        if index and len(events[index - 1]['cells']) > 5:
+            think += rng.uniform(.4, .8)
+        travel = .22 + min(.75, math.dist(previous, target) * .025)
+        depart = now + think
+        arrive = depart + travel
+        click = arrive + rng.uniform(.12, .25)
+        motion.extend([(depart, *previous), (arrive, *target), (click, *target)])
+        times.append(click)
+        now, previous = click, target
+    duration = now + (4.5 if events[-1]['kind'] == 'hit' else 6)
+    motion.append((duration, *previous))
+    return times, motion, duration
 
 
 THEMES = {
@@ -128,54 +221,46 @@ THEMES = {
 def render_svg(calendar, theme):
     palette = THEMES[theme]
     width, cells, mines, numbers, events = build_board(calendar)
-    step, size, left, top = 15, 12, 26, 76
-    svg_width, svg_height = width * step + 49, 224
-    duration, first, last = 24, 2.2, 19
-    times = [first + (last - first) * i / max(1, len(events) - 1) for i in range(len(events))]
-    css = ['text{font-family:-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif}',
-           '.digit{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-weight:700}',
-           '@media(prefers-reduced-motion:reduce){.reveal{animation:none!important;opacity:1!important}.cursor,.live{display:none}.complete{animation:none!important;opacity:1!important}}']
-    reveals = {}
-    flags = {}
+    step, size, left, top = 15, 12, 12, 12
+    svg_width, svg_height = width * step + 21, 126
+    times, motion, duration = build_timeline(events, width)
+    css = ['.digit{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-weight:700}',
+           '@media(prefers-reduced-motion:reduce){.reveal{animation:none!important;opacity:1!important}.cursor{display:none}}']
+    overlays = {}
     for event, time in zip(events, times):
         percentage = time / duration * 100
         name = f's{len(css)}'
-        css.append(f'@keyframes {name}{{0%,{percentage:.3f}%{{opacity:0}}{percentage+.01:.3f}%,99.999%{{opacity:1}}100%{{opacity:0}}}}')
+        css.append(f'@keyframes {name}{{0%,{percentage:.5f}%{{opacity:0}}{percentage+.0001:.5f}%,99.9999%{{opacity:1}}100%{{opacity:0}}}}')
         for index in event['cells']:
-            (flags if event['kind'] == 'flag' else reveals)[index] = name
-    css.append('@keyframes finish{0%,80%{opacity:0}81%,99.999%{opacity:1}100%{opacity:0}}')
-    css.append('@keyframes running{0%,80%{opacity:1}81%,99.999%{opacity:0}100%{opacity:1}}')
+            overlays[index] = (name, event['kind'], index == event['index'])
+    fade = (times[-1] + 1) / duration * 100
+    css.append(f'@keyframes cursor{{0%,{fade:.5f}%{{opacity:1}}{fade+.01:.5f}%,100%{{opacity:0}}}}')
     parts = [f'<svg xmlns="http://www.w3.org/2000/svg" width="{svg_width}" height="{svg_height}" viewBox="0 0 {svg_width} {svg_height}" role="img" aria-labelledby="title desc">',
              f'<title id="title">{escape(calendar["username"])} contribution Minesweeper</title>',
-             '<desc id="desc">An autoplay Minesweeper animation using the public GitHub contribution calendar. Green tiles reveal numbers and mines are flagged.</desc>',
-             f'<style>{"".join(css)}</style>',
-             f'<rect x=".5" y=".5" width="{svg_width-1}" height="{svg_height-1}" rx="12" fill="{palette["bg"]}" stroke="{palette["border"]}"/>',
-             f'<text x="26" y="31" font-size="13" font-weight="650" fill="{palette["text"]}">MINESWEEPER</text>',
-             f'<text x="26" y="51" font-size="11" fill="{palette["muted"]}">A year of contributions. One minefield.</text>',
-             f'<circle cx="{svg_width-114}" cy="27" r="3" fill="#3fb950"/>',
-             f'<text x="{svg_width-104}" y="31" font-size="10" fill="{palette["muted"]}" class="live" style="animation:running {duration}s steps(1,end) infinite">SWEEPING</text>',
-             f'<text x="{svg_width-104}" y="31" font-size="10" fill="#3fb950" class="complete" opacity="0" style="animation:finish {duration}s steps(1,end) infinite">CLEARED</text>']
+             '<desc id="desc">A Minesweeper animation on the public GitHub contribution grid, with deliberate cursor movement and pauses. Moves follow revealed clues; uncertain guesses can hit a mine. The same recorded board replays until the contribution snapshot changes.</desc>',
+             f'<style>{"".join(css)}</style>']
     for i, cell in enumerate(cells):
         if cell is None:
             continue
         x, y = left + i % width * step, top + i // width * step
         parts.append(f'<rect x="{x}" y="{y}" width="{size}" height="{size}" rx="2" fill="{palette["greens"][cell["level"]]}" stroke="{palette["border"]}" stroke-width=".35"/>')
-        if i in mines:
-            name = flags[i]
+        if i not in overlays:
+            continue
+        name, kind, hit = overlays[i]
+        if kind == 'flag':
             content = f'<path d="M{x+4} {y+10}V{y+2}l5 2-5 2M{x+2} {y+10}h5" fill="#f85149" stroke="#f85149" stroke-width="1.2" stroke-linejoin="round"/>'
+        elif kind == 'hit':
+            content = f'<rect x="{x}" y="{y}" width="{size}" height="{size}" rx="2" fill="{"#b6232f" if hit else palette["open"]}"/><path d="M{x+6} {y+2}v8M{x+2} {y+6}h8M{x+3} {y+3}l6 6M{x+3} {y+9}l6-6" stroke="#ff7b72" stroke-width=".9"/><circle cx="{x+6}" cy="{y+6}" r="2.6" fill="{"#ffffff" if hit else "#ff7b72"}"/>'
         else:
-            name = reveals[i]
             content = f'<rect x="{x}" y="{y}" width="{size}" height="{size}" rx="2" fill="{palette["open"]}" stroke="{palette["grid"]}" stroke-width=".5"/>'
             if numbers[i]:
                 content += f'<text x="{x+6}" y="{y+9.5}" text-anchor="middle" class="digit" font-size="10" fill="{palette["numbers"][numbers[i]-1]}">{numbers[i]}</text>'
-        parts.append(f'<g class="reveal" opacity="0" style="animation:{name} {duration}s steps(1,end) infinite">{content}</g>')
-    positions = [f'{left+e["index"]%width*step+6} {top+e["index"]//width*step+6}' for e in events]
-    keytimes = [0, *[time / duration for time in times], 1]
-    values = [positions[0], *positions, positions[-1]]
-    parts.append(f'<g class="cursor" style="animation:running {duration}s steps(1,end) infinite"><animateTransform attributeName="transform" type="translate" values="{";".join(values)}" keyTimes="{";".join(f"{t:.6f}" for t in keytimes)}" dur="{duration}s" repeatCount="indefinite" calcMode="discrete"/><path d="M0 0v12l3-3 3 5 2-1-3-5h5z" fill="{palette["text"]}" stroke="{palette["bg"]}" stroke-width="1.4" stroke-linejoin="round"/></g>')
-    period = f'{calendar["from"]} — {calendar["to"]}'
-    parts.extend([f'<text x="26" y="207" font-size="10" fill="{palette["muted"]}">{calendar["total"]:,} public contributions · {period}</text>',
-                  f'<text x="{svg_width-26}" y="207" text-anchor="end" font-size="10" fill="{palette["muted"]}">{len(mines):03} MINES</text>', '</svg>'])
+        parts.append(f'<g class="reveal" opacity="0" style="animation:{name} {duration:.4f}s steps(1,end) infinite">{content}</g>')
+    keytimes = ';'.join(f'{time / duration:.8f}' for time, _, _ in motion)
+    positions = ';'.join(f'{left+x*step+6:.2f} {top+y*step+6:.2f}' for _, x, y in motion)
+    splines = ';'.join(['.35 0 .2 1'] * (len(motion) - 1))
+    parts.append(f'<g class="cursor" style="animation:cursor {duration:.4f}s steps(1,end) infinite"><animateTransform attributeName="transform" type="translate" values="{positions}" keyTimes="{keytimes}" keySplines="{splines}" dur="{duration:.4f}s" repeatCount="indefinite" calcMode="spline"/><path d="M0 0v12l3-3 3 5 2-1-3-5h5z" fill="{palette["text"]}" stroke="{palette["bg"]}" stroke-width="1.4" stroke-linejoin="round"/></g>')
+    parts.append('</svg>')
     return ''.join(parts)
 
 
