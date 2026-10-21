@@ -111,7 +111,10 @@ def choose_move(width, valid, visible, flagged, cursor, rng, mine_count):
     return 'reveal', index, 'guess'
 
 
-def build_board(calendar):
+ROUND_COUNT = 8
+
+
+def build_board(calendar, round_index=0):
     days = calendar['days']
     first = date.fromisoformat(days[0]['date'])
     offset = (first.weekday() + 1) % 7
@@ -122,11 +125,17 @@ def build_board(calendar):
         cells[(position % 7) * width + position // 7] = day
     valid = {i for i, cell in enumerate(cells) if cell is not None}
     seed = int(sha256(json.dumps(days, sort_keys=True).encode()).hexdigest()[:16], 16)
-    start = min(valid, key=lambda i: (cells[i]['level'], i))
+    seed += round_index * 0x517cc1b727220a95
+    if round_index:
+        opening_rng = random.Random(seed)
+        target = (opening_rng.uniform(0, width - 1), opening_rng.uniform(1, 5))
+        start = min(valid, key=lambda i: (cells[i]['level'], math.dist((i % width, i // width), target)))
+    else:
+        start = min(valid, key=lambda i: (cells[i]['level'], i))
     safe = {start, *neighbors(start, width, 7)}
     candidates = sorted(valid - safe)
     best = None
-    # Curate one recorded game at generation time, then replay it unchanged.
+    # Curate each recorded round using its own snapshot-derived seed.
     # Each candidate is played using visible clues, with genuine guesses if stuck.
     for attempt in range(32):
         rng = random.Random(seed + attempt * 0x9e3779b9)
@@ -140,6 +149,20 @@ def build_board(calendar):
         if best is None or opened > best[0]:
             best = (opened, candidate)
     return best[1]
+
+
+def build_rounds(calendar, count=ROUND_COUNT):
+    rounds, layouts = [], set()
+    for round_index in range(count * 4):
+        board = build_board(calendar, round_index)
+        signature = frozenset(board[2])
+        if signature in layouts:
+            continue
+        layouts.add(signature)
+        rounds.append(board)
+        if len(rounds) == count:
+            return rounds
+    raise ValueError('Could not generate enough distinct Minesweeper boards')
 
 
 def play_board(width, valid, mines, numbers, start, rng):
@@ -207,7 +230,7 @@ def build_timeline(events, width):
     speed = min(1, 56 / now)
     times = [time * speed for time in times]
     motion = [(time * speed, x, y) for time, x, y in motion]
-    duration = now * speed + 4
+    duration = min(now, 56) + 4
     motion.append((duration, *previous))
     return times, motion, duration
 
@@ -222,49 +245,71 @@ THEMES = {
 }
 
 
-def render_svg(calendar, theme):
+def render_svg(calendar, theme, rounds=None):
     palette = THEMES[theme]
-    width, cells, mines, numbers, events = build_board(calendar)
+    rounds = build_rounds(calendar) if rounds is None else rounds
+    width, cells = rounds[0][:2]
     step, size, left, top = 15, 12, 12, 12
     svg_width, svg_height = width * step + 21, 126
-    times, motion, duration = build_timeline(events, width)
+    timelines = [build_timeline(board[4], width) for board in rounds]
+    duration = sum(timeline[2] for timeline in timelines)
     css = ['.digit{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-weight:700}',
-           '@media(prefers-reduced-motion:reduce){.reveal{animation:none!important;opacity:1!important}.cursor{display:none}}']
-    overlays = {}
-    for event, time in zip(events, times):
-        percentage = time / duration * 100
-        name = f's{len(css)}'
-        css.append(f'@keyframes {name}{{0%,{percentage:.5f}%{{opacity:0}}{percentage+.0001:.5f}%,99.9999%{{opacity:1}}100%{{opacity:0}}}}')
-        for index in event['cells']:
-            overlays[index] = (name, event['kind'], index == event['index'])
-    fade = (times[-1] + 1) / duration * 100
-    css.append(f'@keyframes cursor{{0%,{fade:.5f}%{{opacity:1}}{fade+.01:.5f}%,100%{{opacity:0}}}}')
-    parts = [f'<svg xmlns="http://www.w3.org/2000/svg" width="{svg_width}" height="{svg_height}" viewBox="0 0 {svg_width} {svg_height}" role="img" aria-labelledby="title desc">',
-             f'<title id="title">{escape(calendar["username"])} contribution Minesweeper</title>',
-             '<desc id="desc">A Minesweeper animation on the public GitHub contribution grid, with deliberate cursor movement and pauses. Moves follow revealed clues; uncertain guesses can hit a mine. The same recorded board replays until the contribution snapshot changes.</desc>',
-             f'<style>{"".join(css)}</style>']
+           '@media(prefers-reduced-motion:reduce){.round{animation:none!important;opacity:0!important}.round.first{opacity:1!important}.reveal{animation:none!important;opacity:1!important}.cursor{display:none}}']
+    base, groups, motion, cursor_stops = [], [], [], []
     for i, cell in enumerate(cells):
         if cell is None:
             continue
         x, y = left + i % width * step, top + i // width * step
-        parts.append(f'<rect x="{x}" y="{y}" width="{size}" height="{size}" rx="2" fill="{palette["greens"][cell["level"]]}" stroke="{palette["border"]}" stroke-width=".35"/>')
-        if i not in overlays:
-            continue
-        name, kind, hit = overlays[i]
-        if kind == 'flag':
-            content = f'<path d="M{x+4} {y+10}V{y+2}l5 2-5 2M{x+2} {y+10}h5" fill="#f85149" stroke="#f85149" stroke-width="1.2" stroke-linejoin="round"/>'
-        elif kind == 'hit':
-            content = f'<rect x="{x}" y="{y}" width="{size}" height="{size}" rx="2" fill="{"#b6232f" if hit else palette["open"]}"/><path d="M{x+6} {y+2}v8M{x+2} {y+6}h8M{x+3} {y+3}l6 6M{x+3} {y+9}l6-6" stroke="#ff7b72" stroke-width=".9"/><circle cx="{x+6}" cy="{y+6}" r="2.6" fill="{"#ffffff" if hit else "#ff7b72"}"/>'
-        else:
-            content = f'<rect x="{x}" y="{y}" width="{size}" height="{size}" rx="2" fill="{palette["open"]}" stroke="{palette["grid"]}" stroke-width=".5"/>'
-            if numbers[i]:
-                content += f'<text x="{x+6}" y="{y+9.5}" text-anchor="middle" class="digit" font-size="10" fill="{palette["numbers"][numbers[i]-1]}">{numbers[i]}</text>'
-        parts.append(f'<g class="reveal" opacity="0" style="animation:{name} {duration:.4f}s steps(1,end) infinite">{content}</g>')
-    keytimes = ';'.join(f'{time / duration:.8f}' for time, _, _ in motion)
+        base.append(f'<rect x="{x}" y="{y}" width="{size}" height="{size}" rx="2" fill="{palette["greens"][cell["level"]]}" stroke="{palette["border"]}" stroke-width=".35"/>')
+    offset = 0
+    for round_index, (board, timeline) in enumerate(zip(rounds, timelines)):
+        _, _, mines, numbers, events = board
+        times, local_motion, round_duration = timeline
+        start, end = offset / duration * 100, (offset + round_duration) / duration * 100
+        name = f'round{round_index}'
+        visibility = '' if round_index == 0 else f'0%,{start-.000001:.6f}%{{opacity:0}}'
+        visibility += f'{start:.6f}%,{end-.000001:.6f}%{{opacity:1}}{end:.6f}%,100%{{opacity:0}}'
+        css.append(f'@keyframes {name}{{{visibility}}}')
+        overlays = {}
+        for event_index, (event, time) in enumerate(zip(events, times)):
+            percentage = (offset + time) / duration * 100
+            event_name = f'r{round_index}s{event_index}'
+            css.append(f'@keyframes {event_name}{{0%,{percentage:.6f}%{{opacity:0}}{percentage+.000001:.6f}%,99.999999%{{opacity:1}}100%{{opacity:0}}}}')
+            for index in event['cells']:
+                overlays[index] = (event_name, event['kind'], index == event['index'])
+        layout = sha256(','.join(map(str, sorted(mines))).encode()).hexdigest()[:12]
+        first = ' first' if round_index == 0 else ''
+        group = [f'<g class="round{first}" data-round="{round_index+1}" data-start="{offset:.4f}" data-duration="{round_duration:.4f}" data-layout="{layout}" opacity="0" style="animation:{name} {duration:.4f}s steps(1,end) infinite">']
+        for i, (event_name, kind, hit) in sorted(overlays.items()):
+            x, y = left + i % width * step, top + i // width * step
+            if kind == 'flag':
+                content = f'<path d="M{x+4} {y+10}V{y+2}l5 2-5 2M{x+2} {y+10}h5" fill="#f85149" stroke="#f85149" stroke-width="1.2" stroke-linejoin="round"/>'
+            elif kind == 'hit':
+                content = f'<rect x="{x}" y="{y}" width="{size}" height="{size}" rx="2" fill="{"#b6232f" if hit else palette["open"]}"/><path d="M{x+6} {y+2}v8M{x+2} {y+6}h8M{x+3} {y+3}l6 6M{x+3} {y+9}l6-6" stroke="#ff7b72" stroke-width=".9"/><circle cx="{x+6}" cy="{y+6}" r="2.6" fill="{"#ffffff" if hit else "#ff7b72"}"/>'
+            else:
+                content = f'<rect x="{x}" y="{y}" width="{size}" height="{size}" rx="2" fill="{palette["open"]}" stroke="{palette["grid"]}" stroke-width=".5"/>'
+                if numbers[i]:
+                    content += f'<text x="{x+6}" y="{y+9.5}" text-anchor="middle" class="digit" font-size="10" fill="{palette["numbers"][numbers[i]-1]}">{numbers[i]}</text>'
+            group.append(f'<g class="reveal" opacity="0" style="animation:{event_name} {duration:.4f}s steps(1,end) infinite">{content}</g>')
+        group.append('</g>')
+        groups.extend(group)
+        # Hide the pointer during the end hold and reset it between rounds.
+        cursor_stops.extend([(offset, 1), (offset + times[-1] + 1, 1), (offset + times[-1] + 1.001, 0)])
+        motion.extend((offset + time, x, y) for time, x, y in local_motion[:-1])
+        last_time = offset + round_duration - (.001 if round_index < len(rounds) - 1 else 0)
+        motion.append((last_time, *local_motion[-1][1:]))
+        offset += round_duration
+    cursor_stops.append((duration, 0))
+    cursor_css = ''.join(f'{time/duration*100:.7f}%{{opacity:{opacity}}}' for time, opacity in cursor_stops)
+    css.append(f'@keyframes cursor{{{cursor_css}}}')
+    keytimes = ';'.join(f'{time / duration:.9f}' for time, _, _ in motion)
     positions = ';'.join(f'{left+x*step+6:.2f} {top+y*step+6:.2f}' for _, x, y in motion)
     splines = ';'.join(['.35 0 .2 1'] * (len(motion) - 1))
-    parts.append(f'<g class="cursor" style="animation:cursor {duration:.4f}s steps(1,end) infinite"><animateTransform attributeName="transform" type="translate" values="{positions}" keyTimes="{keytimes}" keySplines="{splines}" dur="{duration:.4f}s" repeatCount="indefinite" calcMode="spline"/><path d="M0 0v12l3-3 3 5 2-1-3-5h5z" fill="{palette["text"]}" stroke="{palette["bg"]}" stroke-width="1.4" stroke-linejoin="round"/></g>')
-    parts.append('</svg>')
+    parts = [f'<svg xmlns="http://www.w3.org/2000/svg" width="{svg_width}" height="{svg_height}" viewBox="0 0 {svg_width} {svg_height}" role="img" aria-labelledby="title desc" data-round-count="{len(rounds)}">',
+             f'<title id="title">{escape(calendar["username"])} contribution Minesweeper</title>',
+             f'<desc id="desc">A Minesweeper animation on the public GitHub contribution grid. Each round uses a different mine layout and recorded game, with smooth cursor movement and pauses. The sequence repeats after {len(rounds)} rounds; the daily contribution refresh generates a new set.</desc>',
+             f'<style>{"".join(css)}</style>', *base, *groups,
+             f'<g class="cursor" style="animation:cursor {duration:.4f}s steps(1,end) infinite"><animateTransform attributeName="transform" type="translate" values="{positions}" keyTimes="{keytimes}" keySplines="{splines}" dur="{duration:.4f}s" repeatCount="indefinite" calcMode="spline"/><path d="M0 0v12l3-3 3 5 2-1-3-5h5z" fill="{palette["text"]}" stroke="{palette["bg"]}" stroke-width="1.4" stroke-linejoin="round"/></g>', '</svg>']
     return ''.join(parts)
 
 
@@ -286,9 +331,10 @@ def main():
     calendar = parse_calendar(html, args.username)
     # Fetch/validation happens before writes so failed refreshes retain the previous board.
     args.output.mkdir(parents=True, exist_ok=True)
+    rounds = build_rounds(calendar)
     for theme in THEMES:
         name = 'minesweeper.svg' if theme == 'light' else 'minesweeper-dark.svg'
-        (args.output / name).write_text(render_svg(calendar, theme))
+        (args.output / name).write_text(render_svg(calendar, theme, rounds))
     (args.output / 'contributions.json').write_text(json.dumps(calendar, separators=(',', ':')) + '\n')
     print(f'Generated {len(calendar["days"])} days / {calendar["total"]:,} public contributions for @{args.username}')
 

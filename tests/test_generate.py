@@ -94,6 +94,37 @@ class GeneratorTests(unittest.TestCase):
         self.assertEqual(generate.build_board(original)[2], generate.build_board(original)[2])
         self.assertNotEqual(generate.build_board(original)[2], generate.build_board(changed)[2])
 
+    def test_rotation_uses_distinct_layouts_and_moves(self):
+        rounds = generate.build_rounds(calendar(1))
+        self.assertEqual(len(rounds), 8)
+        self.assertEqual(len({frozenset(board[2]) for board in rounds}), 8)
+        self.assertGreater(len({board[4][0]['index'] for board in rounds}), 1)
+        self.assertEqual(len({tuple((event['kind'], event['index']) for event in board[4]) for board in rounds}), 8)
+        for width, cells, mines, numbers, events in rounds:
+            self.assertEqual(cells, rounds[0][1])
+            self.assertFalse({events[0]['index'], *generate.neighbors(events[0]['index'], width, 7)} & mines)
+            self.assertLessEqual(generate.build_timeline(events, width)[2], 60)
+
+    def test_svg_round_windows_and_cursor_timeline_are_synchronized(self):
+        root = ET.fromstring(generate.render_svg(calendar(1), 'dark'))
+        ns = {'svg': 'http://www.w3.org/2000/svg'}
+        rounds = [group for group in root.findall('svg:g', ns) if 'data-round' in group.attrib]
+        motion = root.find('.//svg:animateTransform', ns)
+        total = float(motion.attrib['dur'].rstrip('s'))
+        self.assertEqual(len(rounds), 8)
+        self.assertEqual(len({group.attrib['data-layout'] for group in rounds}), 8)
+        offset = 0
+        for group in rounds:
+            self.assertAlmostEqual(float(group.attrib['data-start']), offset, places=3)
+            offset += float(group.attrib['data-duration'])
+        self.assertAlmostEqual(total, offset, places=3)
+        times = [float(time) for time in motion.attrib['keyTimes'].split(';')]
+        self.assertEqual(times[0], 0)
+        self.assertEqual(times[-1], 1)
+        self.assertTrue(all(a < b for a, b in zip(times, times[1:])))
+        self.assertEqual(len(times), len(motion.attrib['values'].split(';')))
+        self.assertEqual(len(times) - 1, len(motion.attrib['keySplines'].split(';')))
+
     def test_parser_counts_dates_and_no_contributions(self):
         html = ''.join(f'<td id="d{i}" data-date="{day["date"]}" data-level="1"></td><tool-tip for="d{i}">{"1,200 contributions" if i == 0 else "No contributions"} on a date.</tool-tip>' for i, day in enumerate(calendar()['days']))
         parsed = generate.parse_calendar(html, 'test')

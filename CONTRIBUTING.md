@@ -4,7 +4,9 @@ The profile README displays a compact, script-free Minesweeper SVG directly in G
 
 Moves use revealed-number deductions, including simple subset patterns. When no logical move is available, the player estimates risk from visible clues and pauses before guessing. The generator tries up to 32 seeded boards and records the first successful game, or the game with the most safe tiles revealed if none succeeds. It never uses hidden mine locations to select a move or flag. A losing guess reveals the mines before the loop restarts.
 
-The layout and replay are deterministic for each public contribution snapshot. Refreshing the profile or restarting the animation repeats the same game. Changed contribution data produces a new seed when the daily refresh runs. It is a curated replay rather than a live game.
+The SVG cycles through eight distinct mine layouts and recorded games. Each round lasts up to one minute, with a different opening location and move sequence. The contribution colors stay the same while the mines, numbers, and flags change between rounds. After all eight rounds, the sequence repeats. Refreshing the profile starts from the first round.
+
+The set is deterministic for each public contribution snapshot. Changed contribution data produces a new set of boards when the daily refresh runs. These are curated replays rather than runtime randomization: a GitHub README image cannot run game code to generate unlimited new boards.
 
 Python 3.10+ generates the assets without packages, API keys, or a personal access token:
 
