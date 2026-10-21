@@ -1,0 +1,53 @@
+name: Contribution Minesweeper
+
+on:
+  push:
+    branches: [main]
+    paths-ignore: ['assets/**']
+  pull_request:
+  workflow_dispatch:
+  schedule:
+    - cron: '17 13 * * *'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: minesweeper-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - run: python3 -m unittest discover -s tests -p 'test_*.py'
+
+  refresh:
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    needs: check
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: main
+      - name: Refresh the public contribution calendar
+        run: |
+          python3 scripts/generate.py --username "$PROFILE_OWNER" --output assets
+        env:
+          PROFILE_OWNER: ${{ github.repository_owner }}
+      - name: Save refreshed animation
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add assets
+          if ! git diff --cached --quiet; then
+            git commit -m 'Refresh contribution Minesweeper [skip ci]'
+            git push origin HEAD:main
+          fi

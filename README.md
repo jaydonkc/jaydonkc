@@ -3,6 +3,13 @@
 I'm a Computer Science student at Cal Poly SLO with an interest in using technology to solve meaningful problems.
 
 🤯 Fun fact: I have never eaten a Cheeto 
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/jaydonkc/jaydonkc/main/assets/minesweeper-dark.svg">
+  <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/jaydonkc/jaydonkc/main/assets/minesweeper.svg">
+  <img alt="My GitHub contributions turn into an animated Minesweeper board." src="https://raw.githubusercontent.com/jaydonkc/jaydonkc/main/assets/minesweeper.svg" width="100%">
+</picture>
+
 <!--
 **jaydonkc/jaydonkc** is a ✨ _special_ ✨ repository because its `README.md` (this file) appears on your GitHub profile.
 
