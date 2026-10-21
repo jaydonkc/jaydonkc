@@ -1,6 +1,6 @@
 ## Contribution Minesweeper
 
-The profile README displays a compact, script-free Minesweeper SVG directly in GitHub, with light and dark variants. It shows only the contribution grid and cursor. Smooth pointer movement, uneven pauses, and local moves make the recorded game easier to follow.
+The profile README displays a compact, script-free Minesweeper SVG directly in GitHub, with light and dark variants. It shows only the contribution grid and cursor. Smooth pointer movement, uneven pauses, and local moves make the recorded game easier to follow. Longer games fit into a one-minute replay, including a four-second hold at the end.
 
 Moves use revealed-number deductions, including simple subset patterns. When no logical move is available, the player estimates risk from visible clues and pauses before guessing. The generator tries up to 32 seeded boards and records the first successful game, or the game with the most safe tiles revealed if none succeeds. It never uses hidden mine locations to select a move or flag. A losing guess reveals the mines before the loop restarts.
 

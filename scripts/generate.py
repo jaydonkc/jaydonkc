@@ -203,7 +203,11 @@ def build_timeline(events, width):
         motion.extend([(depart, *previous), (arrive, *target), (click, *target)])
         times.append(click)
         now, previous = click, target
-    duration = now + (4.5 if events[-1]['kind'] == 'hit' else 6)
+    # Keep the uneven rhythm, but fit longer games into a one-minute replay.
+    speed = min(1, 56 / now)
+    times = [time * speed for time in times]
+    motion = [(time * speed, x, y) for time, x, y in motion]
+    duration = now * speed + 4
     motion.append((duration, *previous))
     return times, motion, duration
 

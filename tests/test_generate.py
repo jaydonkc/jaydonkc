@@ -73,13 +73,14 @@ class GeneratorTests(unittest.TestCase):
         self.assertIn(index, {2, 7})
         self.assertEqual(reason, 'deduction')
 
-    def test_cursor_timing_is_slow_varied_and_synchronized(self):
+    def test_cursor_timing_is_varied_synchronized_and_bounded(self):
         width, _, _, _, events = generate.build_board(calendar(1))
         times, motion, duration = generate.build_timeline(events, width)
         intervals = [b - a for a, b in zip(times, times[1:])]
-        self.assertTrue(all(interval > .4 for interval in intervals))
-        self.assertGreater(max(intervals) - min(intervals), .25)
-        self.assertGreater(duration, times[-1] + 4)
+        self.assertTrue(all(interval > .1 for interval in intervals))
+        self.assertGreater(max(intervals) - min(intervals), .08)
+        self.assertAlmostEqual(duration, times[-1] + 4)
+        self.assertLessEqual(duration, 60)
         self.assertTrue(all(a[0] < b[0] for a, b in zip(motion, motion[1:])))
         for time, event in zip(times, events):
             click = next(point for point in motion if point[0] == time)
